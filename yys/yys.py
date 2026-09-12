@@ -323,7 +323,7 @@ class Worker(QObject):
                 return
 
             for i in ['jujue','querenyuhun','zhidao','ying','jiangli','jiangli2','jixu','zhunbei','guanbi',\
-                      'tiaozhan','tiaozhan2','tiaozhan3','queding','tancha','shibai']:
+                      'tiaozhan','tiaozhan2','tiaozhan4','queding','tancha','shibai']:
                 want=self.imgs[i]
                 size = want[0].shape
                 h, w , ___ = size
@@ -337,11 +337,11 @@ class Worker(QObject):
                     last_click=i
                     #self.message_output('重复次数：',refresh)
                     self.message_output(i)
-                    if i == 'tiaozhan' or i=='tiaozhan2' or i=='tiaozhan3' or i=='tancha':
+                    if 'tiaozhan' in i:
                         if refresh==0:
                             cishu=cishu+1
                         self.message_output('挑战次数：'+str(cishu)+'/'+str(self.cishu_max))
-                        t = random.randint(100,200) / 100
+                        t = random.randint(300,500) / 100
                     else:
                         t = random.randint(15,30) / 100
                     if refresh>6 or cishu>self.cishu_max:
