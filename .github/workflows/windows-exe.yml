@@ -1,0 +1,49 @@
+name: Build Windows exe
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [win-build]
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Build
+        run: pyinstaller --noconfirm YYS_win.spec
+
+      - name: Smoke test (headless start for 10s, must not exit early)
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          $p = Start-Process -FilePath dist\YYS.exe -PassThru
+          Start-Sleep -Seconds 10
+          if ($p.HasExited) { Write-Error "YYS.exe exited early with code $($p.ExitCode)"; if (Test-Path error.log) { Get-Content error.log }; exit 1 }
+          Stop-Process -Id $p.Id -Force
+          Write-Host "YYS.exe stayed up for 10s -> startup OK"
+
+      - name: Assemble package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force package | Out-Null
+          Copy-Item dist\YYS.exe package\
+          Copy-Item release\config.ini package\
+          Copy-Item release\使用说明.txt package\
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: YYS-windows
+          path: package/
+          retention-days: 14
