@@ -281,6 +281,8 @@ if __name__ == '__main__':
         config = configparser.ConfigParser(inline_comment_prefixes=';')
         config.sections()
         config.read(config_path)
+    #把配置交给 action 和游戏模块（adb_path / adb_address / [tupo] 等可选项）
+    action.config = config
     #inputs from terminal
     parser = argparse.ArgumentParser(description='Input parameters')
     parser.add_argument('-game', '--game', help='游戏名称')

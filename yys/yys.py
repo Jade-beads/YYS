@@ -5,7 +5,7 @@ import action
 class Worker(QObject):
     finished = pyqtSignal(int)
     progress = pyqtSignal(str,int)
-    start_task = pyqtSignal(int, int)  # Signal to start task with parameters
+    start_task = pyqtSignal(int, float)  # (任务序号, 次数)；次数用 float 才能把 inf 原样传过来，声明成 int 会被截成乱数
     
     def __init__(self,thread_id=None,index=None,cishu_max=None,load_images=True):
         super().__init__()
@@ -27,7 +27,8 @@ class Worker(QObject):
         {'description':'11 厕纸抽卡','func_name':self.chouka,'count_default':'inf'},\
         {'description':'12 秘境召唤','func_name':self.mijing,'count_default':'inf'},\
         {'description':'13 妖气封印/秘闻','func_name':self.yaoqi,'count_default':10},\
-        {'description':'14 契灵boss（单刷）','func_name':self.qilingdanren,'count_default':200}]
+        {'description':'14 契灵boss（单刷）','func_name':self.qilingdanren,'count_default':200},\
+        {'description':'15 个人突破(打8退'+str(action.config_get('tupo','tui','4'))+')','func_name':self.tupo84,'count_default':'inf'}]
         #功能序号
         self.index=index
         self.cishu_max=cishu_max
@@ -45,6 +46,8 @@ class Worker(QObject):
         self.index=index
         if cishu_max < 0:
             cishu_max = float('inf')
+        elif cishu_max != float('inf'):
+            cishu_max = int(cishu_max)
         self.cishu_max=cishu_max
         self.isRunning=True
         if self.index in range(len(self.func)):
@@ -163,6 +166,183 @@ class Worker(QObject):
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
                     break
+
+    ########################################################
+    #个人突破(打8退N)：板上只剩最后一个结界时，先进攻并退出 N 次(退出算失败，用来压结界等级)，再正常打掉
+    #N 在 config.ini 的 [tupo] tui= 里改，默认 4。「次数」按进攻次数算，退出的那几场也算
+    #
+    #这一版结界板(2026-09 实测)：3x3 张卡片，卡片上没有进攻按钮，点卡片弹出面板才有「进攻」；
+    #打赢的卡片整体变灰并盖「破」印；退出/失败的卡片只在右上角多个角标，仍可再打。
+    #所以：已攻破 = 卡片变灰(勋章那一行的亮度)，剩余 = 9 - 已攻破；进攻 = 点卡片 → 面板里点「进攻」→「准备」
+    TUPO_CARDS=[(272,183),(566,183),(861,183),(272,303),(566,303),(861,303),(272,423),(566,423),(861,423)]
+    def tupo84(self):
+        try:
+            n_tui=int(action.config_get('tupo','tui','4'))
+        except ValueError:
+            n_tui=4
+        last_click=''
+        cishu=0
+        refresh=0
+        tui_done=0          #这一板已经退出的次数
+        in_tui=False        #当前这场进攻是要退出的
+        tui_taps=0          #连续点退出按钮的次数(确认弹窗没认出来时不至于死循环)
+        attacks_pending=0   #点了进攻但还没进战斗的次数(突破券不足时弹窗会被关掉又重来)
+        won=False           #这场看到过「赢」
+        remain=None
+        idle=0
+        self.message_output(f'个人突破 打8退{n_tui}')
+        while self.isRunning:   #直到取消，或者出错
+            #截屏
+            screen=action.screenshot(self.thread_id)
+            if screen is None or isinstance(screen,int):
+                self.message_output('截图失败，2秒后重试')
+                if self.sleep_fast(2): return
+                continue
+
+            #A. 弹窗、结算、准备：看到就点（tuichuqueren = 「确认退出战斗吗？」的确认键，要排在准备前面）
+            clicked=False
+            for i in ['jujue','tuichuqueren','queding','queren','queren2',\
+                      'tuposhangxian','shibai','ying','jiangli','jixu','zhunbei']:
+                want=self.imgs[i]
+                h, w , ___ = want[0].shape
+                pts=action.locate(screen.copy(),want,0)
+                if len(pts)==0:
+                    continue
+                if i == 'tuposhangxian':
+                    self.message_output('进攻CD，暂停5分钟')
+                    if self.sleep_fast(60*5): return
+                    clicked=True
+                    break
+                if last_click==i:
+                    refresh=refresh+1
+                else:
+                    refresh=0
+                last_click=i
+                if refresh>6:
+                    self.message_output('重复次数上限：'+i)
+                    return
+                t = random.randint(50,100) / 100
+                if i in ('ying','jiangli'):
+                    #「赢」/奖励 = 这场打赢了。退出模式下还打赢，说明自动战斗比退出快(实测 8 秒就能打完)，不算退出
+                    if in_tui:
+                        self.message_output('退出前就打赢了，这场不算退出')
+                    in_tui=False
+                    won=True
+                elif i in ('shibai','jixu'):
+                    #失败页：顶部失败印记，或底部"点击屏幕继续"(jixu)先被认出来；点过退出箭头且没看到赢才计数
+                    if in_tui and tui_taps>0 and not won:
+                        tui_done=tui_done+1
+                        self.message_output(f'已退出 {tui_done}/{n_tui}')
+                    in_tui=False
+                elif i=='zhunbei':
+                    #点完准备立刻去盯战斗界面：退出模式下要赶在自动战斗打完之前把退出确认掉
+                    t = 1.0
+                self.message_output(i)
+                xy = action.cheat(pts[0], w, h-10)
+                action.touch(xy,self.thread_id)
+                if self.sleep_fast(t): return
+                clicked=True
+                break
+            if clicked:
+                idle=0
+                continue
+
+            #B. 卡片弹出的面板：点「进攻」
+            want=self.imgs['jingong']
+            h, w , ___ = want[0].shape
+            pts=action.locate(screen.copy(),want,0)
+            if not len(pts)==0:
+                attacks_pending=attacks_pending+1
+                if attacks_pending>4:
+                    self.message_output('连续点进攻都没进入战斗，可能突破券不足，停止')
+                    return
+                cishu=cishu+1
+                if cishu > self.cishu_max:
+                    self.message_output('进攻次数上限: '+str(cishu)+'/'+str(self.cishu_max))
+                    return
+                won=False
+                if remain==1 and tui_done<n_tui:
+                    in_tui=True
+                    tui_taps=0
+                    self.message_output(f'最后一个结界，这场退出（{tui_done+1}/{n_tui}）')
+                else:
+                    in_tui=False
+                self.message_output('进攻总次数：'+str(cishu)+'/'+str(self.cishu_max))
+                xy = action.cheat(pts[0], w, h-10)
+                action.touch(xy,self.thread_id)
+                last_click='jingong'
+                idle=0
+                if self.sleep_fast(random.randint(150,250)/100): return
+                continue
+
+            #C. 战斗中(左上角有退出箭头；放技能的过场会把它藏起来，等它回来)
+            want=self.imgs['tui']
+            h, w , ___ = want[0].shape
+            pts=action.locate(screen.copy(),want,0)
+            if not len(pts)==0:
+                attacks_pending=0
+                idle=0
+                if in_tui:
+                    tui_taps=tui_taps+1
+                    if tui_taps>6:
+                        self.message_output('点了退出但没看到确认弹窗，停止')
+                        return
+                    self.message_output(f'退出战斗（第{tui_done+1}/{n_tui}次）')
+                    xy = action.cheat(pts[0], w, h)
+                    action.touch(xy,self.thread_id)
+                    if self.sleep_fast(0.3): return
+                else:
+                    if self.sleep_fast(1): return
+                continue
+
+            #D. 结界板(右侧「个人」页签可见)：数已攻破的卡片，点下一张没攻破的
+            if not len(action.locate(screen.copy(),self.imgs['gerentupo'],0))==0:
+                #面板弹出/过场时整块板被压暗(攻破记录进度条那块正常 170、压暗 66)，这一帧不能拿来判卡片
+                if float(screen[515:545, 240:330].mean())<120:
+                    idle=idle+1
+                    if self.sleep_fast(0.5): return
+                    continue
+                defeated=[]
+                for k,(cx,cy) in enumerate(self.TUPO_CARDS):
+                    patch=screen[cy+22:cy+42, cx-30:cx+90]
+                    #变灰的卡片这一行亮度 88 上下，正常 163~177
+                    if patch.size>0 and float(patch.mean())<125:
+                        defeated.append(k)
+                now_remain=9-len(defeated)
+                if remain is not None and now_remain>remain:
+                    tui_done=0
+                    in_tui=False
+                    self.message_output(f'新的一板结界')
+                if remain!=now_remain:
+                    self.message_output(f'剩余结界：{now_remain}/9')
+                remain=now_remain
+                idle=0
+                if now_remain==0:
+                    #全部攻破：刷新(冷却中时按钮认不出来，就等)
+                    want=self.imgs['shuaxin']
+                    h, w , ___ = want[0].shape
+                    pts=action.locate(screen.copy(),want,0)
+                    if not len(pts)==0:
+                        self.message_output('刷新结界')
+                        xy = action.cheat(pts[0], w, h-10)
+                        action.touch(xy,self.thread_id)
+                        if self.sleep_fast(2): return
+                    else:
+                        if self.sleep_fast(5): return
+                    continue
+                k=[k for k in range(9) if k not in defeated][0]
+                cx,cy=self.TUPO_CARDS[k]
+                self.message_output(f'点第{k+1}张结界')
+                xy = action.cheat((cx,cy), 60, 30)
+                action.touch(xy,self.thread_id)
+                if self.sleep_fast(random.randint(100,150)/100): return
+                continue
+
+            #E. 什么都没认出来：等一下，别空转
+            idle=idle+1
+            if idle%40==0:
+                self.message_output('未识别的界面，等待中（请确认游戏停在个人突破的结界板）')
+            if self.sleep_fast(0.5): return
 
     ########################################################
     #御魂司机
