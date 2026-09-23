@@ -280,7 +280,15 @@ if __name__ == '__main__':
         print('Using config:', config_path)
         config = configparser.ConfigParser(inline_comment_prefixes=';')
         config.sections()
-        config.read(config_path)
+        #config.ini 里有中文注释：不指定编码时 configparser 用系统默认编码，中文 Windows 是 gbk，读 UTF-8 文件直接崩。
+        #依次试 UTF-8(兼容 BOM) → gbk(被老记事本按 ANSI 另存过) → 系统默认
+        for enc in ('utf-8-sig', 'gbk', None):
+            try:
+                config.read(config_path, encoding=enc)
+                break
+            except UnicodeDecodeError:
+                if enc is None:
+                    raise
     #把配置交给 action 和游戏模块（adb_path / adb_address / [tupo] 等可选项）
     action.config = config
     #inputs from terminal
