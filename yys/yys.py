@@ -1,6 +1,11 @@
-import sys,random,time
+import sys,random,time,traceback
+import cv2
 from PyQt6.QtCore import QObject,pyqtSignal
 import action
+
+#grab() 用来从任务函数的任意深处退出(ADB 断了、长时间认不出界面)，由 run() 接住
+class _Stop(Exception):
+    pass
 
 class Worker(QObject):
     finished = pyqtSignal(int)
@@ -33,6 +38,8 @@ class Worker(QObject):
         self.index=index
         self.cishu_max=cishu_max
         self.isRunning=False
+        self.act_t=time.time(); self.warn_t=0; self.fail_n=0    #grab() 用，run() 开头会重置
+        self.idle_warn,self.idle_stop=120,600
         #读取文件
         self.imgs = action.load_imgs(self.game_name)
 
@@ -50,11 +57,26 @@ class Worker(QObject):
             cishu_max = int(cishu_max)
         self.cishu_max=cishu_max
         self.isRunning=True
-        if self.index in range(len(self.func)):
-            command=self.func[self.index]['func_name']
-            command()
-        self.isRunning=False
-        self.finished.emit(self.thread_id)
+        self.act_t=time.time()      #上次"认出界面"的时间：点击、或有意等待 >=1 秒
+        self.warn_t=0
+        self.fail_n=0
+        try:
+            self.idle_warn=float(action.config_get('general','idle_warn','120'))
+            self.idle_stop=float(action.config_get('general','idle_stop','600'))
+        except ValueError:
+            self.idle_warn,self.idle_stop=120,600
+        try:
+            if self.index in range(len(self.func)):
+                command=self.func[self.index]['func_name']
+                command()
+        except _Stop:
+            pass
+        except Exception:
+            #异常逃出 Qt 槽会让 PyQt6 直接终止整个界面进程，所以在这里接住、写进日志
+            self.message_output('任务出错，已停止：\n'+traceback.format_exc(limit=-3))
+        finally:
+            self.isRunning=False
+            self.finished.emit(self.thread_id)
     
     def message_output(self,msg):
         self.progress.emit(msg,self.thread_id)
@@ -66,8 +88,73 @@ class Worker(QObject):
             if not self.isRunning:
                 return True
             time.sleep(0.1)
+        if t>=1:
+            #有意的长等待(冷却、战斗中、等刷新)说明任务知道自己在哪，不算"认不出界面"
+            self.act_t=time.time()
         return False
-    
+
+    #所有任务都用它截图(不要直接调 action.screenshot)。
+    #① 截图失败(ADB 断了、模拟器重启)：原地重试，每 5 次 adb connect 一次，连续 30 次失败就停，
+    #   不把 -1/None 交给任务 —— 以前 -1 进了 matchTemplate 会让整个界面崩掉，连「断开ADB」都来不及点。
+    #② 认不出界面：距上次点击/有意等待超过 idle_warn 秒写一条日志，超过 idle_stop 秒停止(config.ini [general]，0 = 不停)。
+    #   整场战斗期间也是"没点击"，所以阈值要比最长的一场战斗长
+    def grab(self):
+        while True:
+            if not self.isRunning: raise _Stop
+            s=action.screenshot(self.thread_id)
+            if s is not None and not isinstance(s,int): break
+            self.fail_n=self.fail_n+1
+            if self.fail_n==1:
+                self.message_output('截图失败，重试中(模拟器是不是重启了？)')
+            if self.fail_n%5==0 and action.adb_enable[self.thread_id]:
+                dev=action.devices_tab[self.thread_id] or ''
+                if ':' in dev:
+                    self.message_output('重连 ADB：'+action.adb_connect(dev))
+            if self.fail_n>=30:
+                self.message_output('连续 30 次截图失败，停止。确认模拟器正常后点「断开ADB」再「连接ADB」')
+                raise _Stop
+            if self.sleep_fast(0.5): raise _Stop
+        if self.fail_n:
+            self.message_output(f'截图恢复(之前失败 {self.fail_n} 次)')
+            self.fail_n=0
+        idle=time.time()-max(self.act_t,action.last_touch.get(self.thread_id,0))
+        if self.idle_stop>0 and idle>=self.idle_stop:
+            self.message_output(f'已经 {int(idle)} 秒没认出界面，自动停止(游戏是不是停在了这个任务不认识的页面？)')
+            raise _Stop
+        if self.idle_warn>0 and idle>=self.idle_warn and time.time()-self.warn_t>=self.idle_warn:
+            self.warn_t=time.time()
+            self.message_output(f'已经 {int(idle)} 秒没认出界面：请确认游戏停在这个任务的页面上')
+        return s
+
+    #点了"点一下就翻页"的按钮(结算、奖励、准备)之后，等画面真的换了再回主循环。
+    #换页有淡出：逻辑上已经到了下一页，截图里还是旧画面，主循环会照着旧画面再点一次，
+    #而这一下落在下一页同一位置的按钮上(御魂的奖励袋子 (585,498) 正对挑战页的「阴阳术」(610,520))。
+    #names 是这几页会出现的模板；出现新模板 / 全都没了 / 点的那个挪了位置 = 换页了；
+    #只剩刚点的那些 = 还在淡出，接着等。等满 polls 次还没换(点击被动画吞了)，交回主循环重点
+    def wait_change(self,screen,name,pt,names,polls=6):
+        def seen(img):
+            got={}
+            for n in names:
+                p=action.locate(img.copy(),self.imgs[n],0)
+                if p: got[n]=p[0]
+            return got
+        before=seen(screen)
+        before[name]=pt     #locate 在主循环那张图上画过圈，刚点的那个要按点击前的位置算
+        for _ in range(polls):
+            if self.sleep_fast(0.3): return True
+            s=self.grab()
+            if s is None or isinstance(s,int): continue
+            now=seen(s)
+            if not now or any(n not in before for n in now): return False
+            if name in now and abs(now[name][0]-pt[0])+abs(now[name][1]-pt[1])>15: return False
+        return False
+
+    #主循环点完一个按钮后调用：是结算/奖励/准备这类"点一下就翻页"的，等换页再回主循环(见 wait_change)
+    SETTLE=('ying','jiangli','jiangli2','jixu','zhunbei','zhunbei2','shibai','hdjiangli','hdjixu','hdshengli')
+    def settle(self,screen,name,pt):
+        if name not in self.SETTLE: return False
+        return self.wait_change(screen,name,pt,[n for n in self.SETTLE if n in self.imgs])
+
     ####################################################
     #以下是脚本功能代码
     ####################################################
@@ -83,7 +170,7 @@ class Worker(QObject):
             #截屏
             #im = np.array(mss.mss().grab(monitor))
             #screen = cv2.cvtColor(im, cv2.COLOR_BGRA2BGR)
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             #cv2.imshow("Image", screen)
             #cv2.waitKey(0)
 
@@ -174,7 +261,26 @@ class Worker(QObject):
     #这一版结界板(2026-09 实测)：3x3 张卡片，卡片上没有进攻按钮，点卡片弹出面板才有「进攻」；
     #打赢的卡片整体变灰并盖「破」印；退出/失败的卡片只在右上角多个角标，仍可再打。
     #所以：已攻破 = 卡片变灰(勋章那一行的亮度)，剩余 = 9 - 已攻破；进攻 = 点卡片 → 面板里点「进攻」→「准备」
+    #
+    #选卡按勋章数(勋章越多对手越强)：还没输过时从多到少打，第一张就是探路 —— 打赢了多半能打满，照常冲 9 胜，
+    #勋章最少的留到最后退 N 次。中途真输一场(不是主动退出)就放弃这一板的 9 胜，只保 3/6 胜的里程碑(奖励自动发放)：
+    #第一次输时已赢 0~3 张 → 打到 3 胜刷新；4~6 张 → 打到 6 胜刷新；7 张以上 → 立即刷新；之后改成从勋章少的打。
+    #第二张也输了 = 剩下的更打不过，立即刷新。真输扣突破券，所以连续两板 0 胜就停(最多亏 4 张券)。
+    #没打满时刷新会弹确认框「刷新后攻破记录进度将重置，确定吗？」：右边「确定」就是 A 里现成的 queding(2026-09-26 实测 1.00)；
+    #认不出来就存一帧 screenshot.png 停下
     TUPO_CARDS=[(272,183),(566,183),(861,183),(272,303),(566,303),(861,303),(272,423),(566,423),(861,423)]
+
+    #数第 k 张卡片有几个勋章：名字下面一排 5 个槽位，有勋章的是银色星章(纹理多，亮度标准差 24~26)，
+    #空槽是平的米色圆(标准差 1)。2026-09-26 在本机结界板上实测校准；上游的 xunzhang 模板在这版界面上只有 0.43
+    def tupo_medals(self,screen,k):
+        cx,cy=self.TUPO_CARDS[k]
+        n=0
+        for i in range(5):
+            x,y=cx-42+34*i,cy+25
+            if float(screen[y-6:y+6,x-6:x+6].mean(axis=2).std())>10:
+                n=n+1
+        return n
+
     def tupo84(self):
         try:
             n_tui=int(action.config_get('tupo','tui','4'))
@@ -189,11 +295,42 @@ class Worker(QObject):
         attacks_pending=0   #点了进攻但还没进战斗的次数(突破券不足时弹窗会被关掉又重来)
         won=False           #这场看到过「赢」
         remain=None
+        last_read=None      #上一帧数出来的剩余数
         idle=0
-        self.message_output(f'个人突破 打8退{n_tui}')
+        picked=None         #最近点开的是第几张卡片
+        fighting=None       #这场打的是第几张卡片(点「进攻」时记下)
+        pending_loss=None   #看到失败页的那张卡片：回到板上确认它没变灰，才算真输
+        lost=set()          #这一板真输过的卡片，不再打
+        target=None         #放弃 9 胜后的目标胜场，到了就刷新；None = 还在冲 9 胜
+        refreshing=0        #点了几次「刷新」还没确认(>0 = 正在刷新)
+        refresh_wait=0      #刷新中什么都没点成的帧数
+        cd_wait=0           #等刷新冷却的轮数(每轮 5 秒)
+        zero_boards=0       #连续 0 胜就刷新掉的板数
+        last_medals=None    #上次打到日志里的各卡勋章数
+
+        def new_board(msg):
+            #换了一板结界：清掉这一板的记录
+            nonlocal tui_done,in_tui,remain,last_read,picked,fighting,pending_loss,target,refreshing,refresh_wait,cd_wait,zero_boards
+            if remain is not None:
+                zero_boards = zero_boards+1 if remain==9 else 0
+            tui_done=0
+            in_tui=False
+            remain=None
+            last_read=None
+            picked=None
+            fighting=None
+            pending_loss=None
+            lost.clear()
+            target=None
+            refreshing=0
+            refresh_wait=0
+            cd_wait=0
+            self.message_output(msg)
+
+        self.message_output(f'个人突破 打8退{n_tui}；勋章多的先打探路，输了只保 3/6 胜，输两张就刷新')
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             if screen is None or isinstance(screen,int):
                 self.message_output('截图失败，2秒后重试')
                 if self.sleep_fast(2): return
@@ -222,18 +359,28 @@ class Worker(QObject):
                     self.message_output('重复次数上限：'+i)
                     return
                 t = random.randint(50,100) / 100
+                refresh_confirm=False
                 if i in ('ying','jiangli'):
                     #「赢」/奖励 = 这场打赢了。退出模式下还打赢，说明自动战斗比退出快(实测 8 秒就能打完)，不算退出
                     if in_tui:
                         self.message_output('退出前就打赢了，这场不算退出')
                     in_tui=False
                     won=True
+                    fighting=None
                 elif i in ('shibai','jixu'):
                     #失败页：顶部失败印记，或底部"点击屏幕继续"(jixu)先被认出来；点过退出箭头且没看到赢才计数
                     if in_tui and tui_taps>0 and not won:
                         tui_done=tui_done+1
                         self.message_output(f'已退出 {tui_done}/{n_tui}')
+                    elif fighting is not None and not won:
+                        #没退出却失败 = 真输。jixu 在赢的结算页上也可能被认出来，所以先记下，回到板上看卡片没变灰才算
+                        pending_loss=fighting
                     in_tui=False
+                    fighting=None
+                elif refreshing and i in ('tuichuqueren','queding','queren','queren2'):
+                    #没打满时刷新弹出的确认框
+                    refresh_confirm=True
+                    t = 2
                 elif i=='zhunbei':
                     #点完准备立刻去盯战斗界面：退出模式下要赶在自动战斗打完之前把退出确认掉
                     t = 1.0
@@ -241,11 +388,23 @@ class Worker(QObject):
                 xy = action.cheat(pts[0], w, h-10)
                 action.touch(xy,self.thread_id)
                 if self.sleep_fast(t): return
+                #结算/奖励页等换页再截图(淡出时补点会点到结界板的卡片上)；准备页不等，退出模式要赶在自动战斗打完前退掉
+                if i!='zhunbei' and self.settle(screen,i,pts[0]): return
+                if refresh_confirm:
+                    new_board('已确认刷新，新的一板结界')
                 clicked=True
                 break
             if clicked:
                 idle=0
                 continue
+
+            #点了刷新，确认框却一直没点成(多半是确认键模板和这版界面对不上)：存一帧好补模板
+            if refreshing:
+                refresh_wait=refresh_wait+1
+                if refresh_wait>8:
+                    cv2.imwrite('screenshot.png',cv2.cvtColor(screen,cv2.COLOR_RGB2BGR))
+                    self.message_output('点了刷新但没认出确认框，已存当前画面到 screenshot.png(用来裁确认键模板)，停止')
+                    return
 
             #B. 卡片弹出的面板：点「进攻」
             want=self.imgs['jingong']
@@ -261,7 +420,8 @@ class Worker(QObject):
                     self.message_output('进攻次数上限: '+str(cishu)+'/'+str(self.cishu_max))
                     return
                 won=False
-                if remain==1 and tui_done<n_tui:
+                fighting=picked
+                if remain==1 and tui_done<n_tui and target is None:
                     in_tui=True
                     tui_taps=0
                     self.message_output(f'最后一个结界，这场退出（{tui_done+1}/{n_tui}）')
@@ -302,6 +462,12 @@ class Worker(QObject):
                     idle=idle+1
                     if self.sleep_fast(0.5): return
                     continue
+                want=self.imgs['shuaxin']
+                h, w , ___ = want[0].shape
+                pts_sx=action.locate(screen.copy(),want,0)
+                if refreshing and len(pts_sx)==0:
+                    #点了刷新，没弹确认框、板子已经回来且按钮进了冷却 = 刷新完成
+                    new_board('刷新完成，新的一板结界')
                 defeated=[]
                 for k,(cx,cy) in enumerate(self.TUPO_CARDS):
                     patch=screen[cy+22:cy+42, cx-30:cx+90]
@@ -309,28 +475,62 @@ class Worker(QObject):
                     if patch.size>0 and float(patch.mean())<125:
                         defeated.append(k)
                 now_remain=9-len(defeated)
+                #连续两帧数得一样才算数：过场淡入淡出时整板亮度在变，单帧可能把正常卡片数成灰的
+                if now_remain!=last_read:
+                    last_read=now_remain
+                    if self.sleep_fast(0.3): return
+                    continue
                 if remain is not None and now_remain>remain:
-                    tui_done=0
-                    in_tui=False
-                    self.message_output(f'新的一板结界')
+                    new_board('新的一板结界')
                 if remain!=now_remain:
                     self.message_output(f'剩余结界：{now_remain}/9')
                 remain=now_remain
                 idle=0
-                if now_remain==0:
-                    #全部攻破：刷新(冷却中时按钮认不出来，就等)
-                    want=self.imgs['shuaxin']
-                    h, w , ___ = want[0].shape
-                    pts=action.locate(screen.copy(),want,0)
-                    if not len(pts)==0:
-                        self.message_output('刷新结界')
-                        xy = action.cheat(pts[0], w, h-10)
-                        action.touch(xy,self.thread_id)
-                        if self.sleep_fast(2): return
+                wins=9-now_remain
+                if pending_loss is not None:
+                    if pending_loss in defeated:
+                        #结算页是赢的，只是先认出了 jixu
+                        pass
                     else:
+                        lost.add(pending_loss)
+                        if target is None:
+                            #第一次输：已赢 0~3 → 保 3 胜；4~6 → 保 6 胜；7 以上 → 立即刷新
+                            target = 3 if wins<=3 else (6 if wins<=6 else wins)
+                            self.message_output(f'第{pending_loss+1}张打输了(已赢{wins}张)，这一板放弃 9 胜，打到 {target} 胜就刷新')
+                        else:
+                            #第二次输：已经在从勋章最少的打了还输，剩下的只会更难。目标 = 现有胜场 → 下面立即刷新
+                            target=wins
+                            self.message_output(f'第{pending_loss+1}张也打输了(已赢{wins}张)，剩下的更难，立即刷新')
+                    pending_loss=None
+                todo=[k for k in range(9) if k not in defeated and k not in lost]
+                if now_remain==0 or (target is not None and (wins>=target or len(todo)==0)):
+                    #全部攻破 / 到了目标胜场 / 能打的都打过了：刷新(冷却中时按钮带倒计时认不出来，就等)
+                    if now_remain==9 and zero_boards>=1:
+                        self.message_output('连续两板 0 胜，可能阵容打不过，停止')
+                        return
+                    if len(pts_sx)==0:
+                        if cd_wait%12==0:
+                            self.message_output('等刷新冷却' if now_remain>0 else '等结界板刷新')
+                        cd_wait=cd_wait+1
                         if self.sleep_fast(5): return
+                        continue
+                    if refreshing>=3:
+                        self.message_output('点了 3 次刷新都没反应，停止')
+                        return
+                    refreshing=refreshing+1
+                    refresh_wait=0
+                    self.message_output(f'刷新结界(这一板赢了 {wins} 张)')
+                    xy = action.cheat(pts_sx[0], w, h-10)
+                    action.touch(xy,self.thread_id)
+                    if self.sleep_fast(1.5): return
                     continue
-                k=[k for k in range(9) if k not in defeated][0]
+                #没输过：勋章多的先打(探路)；输过：勋章少的先打。勋章一样时按板上顺序
+                medals={k:self.tupo_medals(screen,k) for k in todo}
+                if medals!=last_medals:
+                    last_medals=medals
+                    self.message_output('勋章：'+' '.join(f'{k+1}号{m}' for k,m in medals.items()))
+                k=min(todo,key=lambda k: medals[k] if lost else -medals[k])
+                picked=k
                 cx,cy=self.TUPO_CARDS[k]
                 self.message_output(f'点第{k+1}张结界')
                 xy = action.cheat((cx,cy), 60, 30)
@@ -353,7 +553,7 @@ class Worker(QObject):
         
         while self.isRunning:
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #self.message_output('screen shot ok',time.ctime())
             #体力不足
@@ -399,6 +599,7 @@ class Worker(QObject):
                     xy = action.cheat(pts[0], w, h-10 )
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
         
     ########################################################
@@ -409,7 +610,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #体力不足
             want = self.imgs['notili']
@@ -478,6 +679,7 @@ class Worker(QObject):
                     action.touch(xy,self.thread_id)
                     last_click=i
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
                 
 
@@ -490,7 +692,7 @@ class Worker(QObject):
         
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #体力不足
             want = self.imgs['notili']
@@ -530,6 +732,8 @@ class Worker(QObject):
                     xy = action.cheat(pts[0], w, h-10 )
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
+                    #结算/奖励/准备：等换页再截图，否则淡出时会照旧画面再点一下，点到挑战页的「阴阳术」
+                    if self.settle(screen,i,pts[0]): return
                     break
 
     ########################################################
@@ -544,7 +748,7 @@ class Worker(QObject):
         boss_done=False
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
 
             #体力不足
             want = self.imgs['notili']
@@ -685,6 +889,7 @@ class Worker(QObject):
                     else:
                         t = random.randint(15,30) / 100
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
 
     ########################################################
@@ -695,7 +900,7 @@ class Worker(QObject):
         cishu=0
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #体力不足
             want = self.imgs['notili']
@@ -782,6 +987,7 @@ class Worker(QObject):
                     else:
                         t = random.randint(15,30) / 100
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
                 
     ########################################################
@@ -796,7 +1002,7 @@ class Worker(QObject):
         boss_done=False
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #体力不足
             want = self.imgs['notili']
@@ -886,8 +1092,9 @@ class Worker(QObject):
                                 if self.sleep_fast(t): return
                     continue
 
+            #zhunbei：点小怪后这版客户端会停在战斗准备页，没有它就卡住(2026-09-26 实测)
             for i in ['jujue','querenyuhun',\
-                      'tansuo','ying','jiangli','jixu','c28','ditu']:
+                      'tansuo','ying','jiangli','jixu','zhunbei','c28','ditu']:
                 want = self.imgs[i]
                 size = want[0].shape
                 h, w , ___ = size
@@ -911,6 +1118,7 @@ class Worker(QObject):
                     action.touch(xy,self.thread_id)
                     t = random.randint(15,30) / 100
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
 
     ########################################################
@@ -922,7 +1130,7 @@ class Worker(QObject):
         
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
 
             #设定目标，开始查找
             #进入后
@@ -1023,7 +1231,7 @@ class Worker(QObject):
         
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
 
             for i in ['jujue','shoudong','zidong','queren',\
                       'douji','douji2','douji3','douji4','douji5',\
@@ -1070,6 +1278,7 @@ class Worker(QObject):
                     xy = action.cheat(pts[0], w, h-10 )
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
 
     ########################################################
@@ -1081,7 +1290,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
 
             #体力不足
             want = self.imgs['notili']
@@ -1136,6 +1345,7 @@ class Worker(QObject):
                     action.touch(xy,self.thread_id)
                     #self.message_output('等待时间：',t)
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
 
     ##########################################################
     #合成结界卡
@@ -1144,7 +1354,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             for i in ['taiyin2','sanshinei','taiyin3']:
                 want = self.imgs[i]
@@ -1201,7 +1411,7 @@ class Worker(QObject):
                     action.touch(xy,self.thread_id)
 
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
 
             want = self.imgs['hecheng']
             size = want[0].shape
@@ -1233,7 +1443,7 @@ class Worker(QObject):
         
         while self.isRunning:
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             want = self.imgs['zaicizhaohuan']
             size = want[0].shape
@@ -1259,7 +1469,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
                 
             for i in ['jineng','jixushengxing',\
                       'jixuyucheng','querenshengxing']:
@@ -1299,7 +1509,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #检测聊天界面
             want = self.imgs['liaotianguanbi']
@@ -1368,7 +1578,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #委派任务
             for i in ['jujue','jiangli','jixu','zhunbei',\
@@ -1403,6 +1613,7 @@ class Worker(QObject):
                     xy = action.cheat(pts[0], w, h-10 )
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break
             
             #体力不足
@@ -1424,7 +1635,7 @@ class Worker(QObject):
         refresh=0
         while self.isRunning:   #直到取消，或者出错
             #截屏
-            screen=action.screenshot(self.thread_id)
+            screen=self.grab()
             
             #体力不足
             want = self.imgs['notili']
@@ -1467,4 +1678,5 @@ class Worker(QObject):
                     xy = action.cheat(pts[0], w, h-10 )
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
+                    if self.settle(screen,i,pts[0]): return
                     break

@@ -10,6 +10,7 @@ config=None     #main.py 读完 config.ini 后赋值(configparser.ConfigParser)�
 scalar=False
 scaling_factor=1
 monitor=None
+last_touch={}   #thread_id -> 上次点击/滑动的 time.time()，Worker 用它判断"多久没认出界面了"
 #截屏，并裁剪以加速
 upleft = (0, 0)
 downright = (1136, 700)
@@ -403,6 +404,7 @@ def cheat(p, w, h):
 
 # 点击屏幕，参数pos为目标坐标
 def touch(pos,thread_id):
+    last_touch[thread_id]=time.time()
     x, y = pos
     if adb_enable[thread_id]:
         comm=[adb_path,"-s",devices_tab[thread_id],"shell","input","tap",str(x),str(y)]
@@ -415,6 +417,7 @@ def touch(pos,thread_id):
 
 
 def swipe(pos,thread_id,dy):
+    last_touch[thread_id]=time.time()
     x, y = pos
     x1=x
     if y>dy:

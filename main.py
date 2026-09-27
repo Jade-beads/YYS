@@ -14,6 +14,16 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import QThread,pyqtSignal,QProcess,QMutex,Qt
 import action
+import traceback
+
+#PyQt6 在槽函数抛出未捕获异常时会直接终止整个进程(窗口一闪就没了)。装一个钩子只打印、不退出。
+#打包版 console=False 时 sys.stderr 是 None，打印失败也不能再抛
+def _excepthook(etype,value,tb):
+    try:
+        traceback.print_exception(etype,value,tb)
+    except Exception:
+        pass
+sys.excepthook=_excepthook
 
 
 def resource_path(rel_path: str) -> str:
@@ -232,8 +242,8 @@ class MainWindow(QMainWindow):
         textBrowser=self.tab[thread_id].textBrowser
         #截屏
         screen=action.screenshot(thread_id)
-        if isinstance(screen, int) and screen == -1:
-            textBrowser.append('截图失败')
+        if screen is None or isinstance(screen, int):
+            textBrowser.append('截图失败(ADB 断了？先点「连接ADB」)')
             return
         textBrowser.append(f'截图分辨率: {screen.shape[1]}x{screen.shape[0]}')
         screen = screen[0:screen.shape[0], 0:screen.shape[1]]
