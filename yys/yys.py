@@ -1,4 +1,4 @@
-import sys,random,time,traceback
+import sys,os,random,time,traceback
 import cv2
 from PyQt6.QtCore import QObject,pyqtSignal
 import action
@@ -33,7 +33,9 @@ class Worker(QObject):
         {'description':'12 秘境召唤','func_name':self.mijing,'count_default':'inf'},\
         {'description':'13 妖气封印/秘闻','func_name':self.yaoqi,'count_default':10},\
         {'description':'14 契灵boss（单刷）','func_name':self.qilingdanren,'count_default':200},\
-        {'description':'15 个人突破(打8退'+str(action.config_get('tupo','tui','4'))+')','func_name':self.tupo84,'count_default':'inf'}]
+        {'description':'15 个人突破(打8退'+str(action.config_get('tupo','tui','4'))+')','func_name':self.tupo84,'count_default':'inf'},\
+        {'description':'16 英杰试炼·鬼兵演武','func_name':self.yingjie_guibing,'count_default':30},\
+        {'description':'17 英杰试炼·梦墟秘境','func_name':self.yingjie_mengxu,'count_default':50}]
         #功能序号
         self.index=index
         self.cishu_max=cishu_max
@@ -685,7 +687,116 @@ class Worker(QObject):
 
     ########################################################
     #御魂单人
-    def yuhundanren(self):
+    #英杰试炼·鬼兵演武：流程和单人御魂一样(挑战 → 准备 → 战斗 → 结算)，只是「挑战」按钮长得不同。
+    #tiaozhan6 从本机鬼兵演武页裁(1.00)；不放 tancha，它在这页的体力图标旁有 0.94，离阈值太近
+    GUIBING=['jujue','querenyuhun','zhidao','ying','jiangli','jiangli2','jixu','zhunbei','guanbi',
+             'tiaozhan6','queding','shibai']
+    def yingjie_guibing(self):
+        self.yuhundanren(self.GUIBING)
+
+    #英杰试炼·梦墟秘境：挑战 → 准备 → 战斗 → 结算；打完带「祝」的关卡会出「请选择奖励」(4 张祝福卡)。
+    #阶段一：按 MX_TARGET 升 涤尘 4 / 同调 3 / 遏云 2(优先级同顺序)，卡上没有要的就选第一张；
+    #都到了 → 阶段二：战斗里点右下角阴阳师头像 → 「智能」(之后的战斗会保持，只点一次)，祝福一律选第一张。
+    #卡上的 Lv.N 是选了之后的等级，有 Lv.2~4 的模板(mx_lv2~4)，读不出来(Lv.5)就按记录 +1 推算。
+    #选卡：点卡片(选中 + 弹详情) → 点标题空白处关掉详情 → 点「确定」。名字模板取「·」后两个字(mx_dichen/mx_tongtiao/mx_eyun)
+    MENGXU=['jujue','querenyuhun','zhidao','ying','jiangli','jiangli2','jixu','zhunbei','guanbi',
+            'tiaozhan7','queding','shibai']
+    MX_TARGET=[('mx_dichen','涤尘',4),('mx_tongtiao','同调',3),('mx_eyun','遏云',2)]
+    MX_CARDS=[162,431,700,969]      #4 张卡的中心 x
+    def yingjie_mengxu(self):
+        #mx_lv：这一局各祝福当前等级(读到或推算)；mx_auto：阴阳师技能已改成「智能」。
+        #停了再点开始不清空(同一个界面进程里 Worker 不重建)；新的一局靠"卡上等级比记录的低"自动清空
+        if not hasattr(self,'mx_lv'):
+            self.mx_lv={}
+            self.mx_auto=False
+        self.mx_try=0
+        self.yuhundanren(self.MENGXU,hook=self.mengxu_hook)
+
+    def mx_phase2(self):
+        return all(self.mx_lv.get(n,1)>=lv for n,_,lv in self.MX_TARGET)
+
+    #读 4 张卡：[(名字模板 或 None, 卡上显示的等级 或 None), ...]
+    def mx_read(self,screen):
+        cards=[]
+        for cx in self.MX_CARDS:
+            name=next((n for n,_,_ in self.MX_TARGET if n in self.imgs and
+                       action.locate(screen[300:365,cx-125:cx+125].copy(),self.imgs[n],0)),None)
+            lv=next((d for d in (2,3,4,5) if f'mx_lv{d}' in self.imgs and
+                     action.locate(screen[375:412,cx-125:cx-20].copy(),self.imgs[f'mx_lv{d}'],0)),None)
+            cards.append((name,lv))
+        return cards
+
+    def mengxu_pick(self,screen):
+        cards=self.mx_read(screen)
+        #目标技能的模板缺失、或目标卡上的等级读不出来(Lv.5 等)：把选择页存进 ./mengxu/ 好补裁，最多 20 张
+        if any(n not in self.imgs for n,_,_ in self.MX_TARGET) or any(n and l is None for n,l in cards):
+            os.makedirs('mengxu',exist_ok=True)
+            k_=len(os.listdir('mengxu'))
+            if k_<20:
+                cv2.imwrite(f'mengxu/select_{k_+1:02d}.png',cv2.cvtColor(screen,cv2.COLOR_RGB2BGR))
+        #卡上显示的等级不比记录的高 = 已经是新的一局，记录作废
+        if any(n and lv and self.mx_lv.get(n,0)>=lv for n,lv in cards):
+            self.message_output('祝福等级比记录的低，当作新的一局，重新计数')
+            self.mx_lv={}
+        #没选的卡也能说明当前等级：卡上 Lv.N = 选了之后的等级，所以现在是 N-1
+        for n,lv in cards:
+            if n and lv: self.mx_lv[n]=max(self.mx_lv.get(n,1),lv-1)
+        k=0
+        if not self.mx_phase2():
+            for n,_,top in self.MX_TARGET:
+                hit=[i for i,(m,_) in enumerate(cards) if m==n]
+                if hit and (cards[hit[0]][1] or self.mx_lv.get(n,1)+1)<=top:
+                    k=hit[0]; break
+        n,shown=cards[k]
+        zh={a:b for a,b,_ in self.MX_TARGET}
+        self.message_output('祝福：'+' '.join(f'{i+1}号'+(zh[m] if m else '?')+(f'Lv{l}' if l else '')
+                            for i,(m,l) in enumerate(cards))+f' → 选{k+1}号')
+        action.touch(action.cheat((self.MX_CARDS[k],225),40,30),self.thread_id)   #点卡片：选中并弹出详情
+        if self.sleep_fast(0.8): return True
+        action.touch(action.cheat((568,62),30,10),self.thread_id)              #点标题空白处关掉详情，选择不变
+        if self.sleep_fast(0.8): return True
+        pts=action.locate(self.grab(),self.imgs['mx_queding'],0)
+        action.touch(action.cheat(pts[0] if pts else (568,578),40,20),self.thread_id)
+        if self.sleep_fast(1.0): return True
+        for _ in range(5):
+            if not action.locate(self.grab(),self.imgs['mx_xuanze'],0):
+                if n: self.mx_lv[n]=shown or self.mx_lv.get(n,1)+1
+                if self.mx_phase2() and not self.mx_auto:
+                    self.message_output('涤尘4 / 同调3 / 遏云2 已到：阴阳师技能改「智能」，之后祝福选第一张')
+                return True
+            if self.sleep_fast(0.5): return True
+        self.message_output('点了确定但选择页还在，重试')
+        return True
+
+    #阴阳师技能改「智能」：点右下角阴阳师头像弹出技能栏，再点「智能」。改过之后的战斗会保持，只做一次
+    def mengxu_set_auto(self,screen):
+        self.mx_try=self.mx_try+1
+        pts=action.locate(screen.copy(),self.imgs['zhineng'],0)
+        if not pts:
+            action.touch(action.cheat((1086,585),20,20),self.thread_id)
+            if self.sleep_fast(0.8): return True
+            pts=action.locate(self.grab(),self.imgs['zhineng'],0)
+        if pts:
+            action.touch(action.cheat(pts[0],20,20),self.thread_id)
+            self.mx_auto=True
+            self.message_output('阴阳师技能已改为「智能」')
+        elif self.mx_try>=3:
+            self.message_output('没找到「智能」按钮，跳过，请手动改一次')
+        self.sleep_fast(0.5)
+        return True
+
+    #返回 True = 这一帧处理过了，主循环重新截图
+    def mengxu_hook(self,screen):
+        if action.locate(screen.copy(),self.imgs['mx_xuanze'],0):
+            return self.mengxu_pick(screen)
+        if self.mx_phase2() and not self.mx_auto and self.mx_try<3:
+            #战斗中：左上退出箭头在，且不是准备页(准备页也有退出箭头)
+            if action.locate(screen.copy(),self.imgs['tui'],0) and not action.locate(screen.copy(),self.imgs['zhunbei'],0):
+                return self.mengxu_set_auto(screen)
+        return False
+
+    #hook(screen)：每帧先调，返回 True 表示这一帧它处理了(梦墟秘境的选祝福、改智能)
+    def yuhundanren(self,names=None,hook=None):
         last_click=''
         cishu=0
         refresh=0
@@ -704,7 +815,10 @@ class Worker(QObject):
                 self.message_output('体力不足')
                 return
 
-            for i in ['jujue','querenyuhun','zhidao','ying','jiangli','jiangli2','jixu','zhunbei','guanbi',\
+            if hook and hook(screen):
+                continue
+
+            for i in names or ['jujue','querenyuhun','zhidao','ying','jiangli','jiangli2','jixu','zhunbei','guanbi',\
                       'tiaozhan','tiaozhan2','tiaozhan4','queding','tancha','shibai']:
                 want=self.imgs[i]
                 size = want[0].shape
@@ -1627,12 +1741,32 @@ class Worker(QObject):
                 return
 
     ########################################################
-    #契灵单人
+    #契灵单人：刷材料，结契失败放弃，不点「再次结契」。
+    #成功页按「继续 / 确认」正常领取，保留契灵；不操作「释放 / 弃置 / 召唤」。
+    QILING_CONTINUE=('ying','jiangli','jixu','queding','queren','queren2','queren3','zhunbei','shibai')
+    QILING_WAIT=('ql_failed','ql_abandon','tiaozhan5')+QILING_CONTINUE
+
+    def qiling_challenge_disabled(self,screen):
+        #归一化模板匹配对变灰不敏感。挑战页标题 + 灰度文字位置 + 颜色一起判断。
+        if not action.locate(screen.copy(),self.imgs['ql_board'],0):
+            return False
+        tpl=self.imgs['tiaozhan5'][0]
+        h,w=tpl.shape[:2]
+        result=cv2.matchTemplate(cv2.cvtColor(screen,cv2.COLOR_RGB2GRAY),
+                                 cv2.cvtColor(tpl,cv2.COLOR_RGB2GRAY),cv2.TM_CCOEFF_NORMED)
+        _,score,_,(x,y)=cv2.minMaxLoc(result)
+        if score<self.imgs['tiaozhan5'][1]:
+            return False
+        normal=cv2.cvtColor(tpl,cv2.COLOR_RGB2HSV)[:,:,1].mean()
+        current=cv2.cvtColor(screen[y:y+h,x:x+w],cv2.COLOR_RGB2HSV)[:,:,1].mean()
+        return current<normal*0.4
+
     def qilingdanren(self):
         last_click=''
         cishu=0
-        
         refresh=0
+        disabled_frames=0
+        pending_attacks=0
         while self.isRunning:   #直到取消，或者出错
             #截屏
             screen=self.grab()
@@ -1641,19 +1775,40 @@ class Worker(QObject):
             want = self.imgs['notili']
             size = want[0].shape
             h, w , ___ = size
-            target = screen
+            target = screen.copy()
             pts = action.locate(target,want,0)
             if not len(pts) == 0:
                 self.message_output('体力不足')
                 return
 
-            for i in ['jujue','ying','jiangli','jixu','queding',\
-                      'qiling1','mingqi','queren3',\
-                      'tiaozhan5','shibai','xiaozhiren']:
+            #结契失败是独立页面，和普通战败 shibai 不同。
+            #标题 + 放弃按钮同时出现才操作；按钮位置来自模板，不盲点固定坐标。
+            if (action.locate(screen.copy(),self.imgs['ql_failed'],0) and
+                    (pts:=action.locate(screen.copy(),self.imgs['ql_abandon'],0))):
+                refresh=refresh+1 if last_click=='ql_abandon' else 0
+                last_click='ql_abandon'
+                if refresh>=3:
+                    self.message_output('放弃结契后页面未变化，停止，请检查游戏弹窗')
+                    return
+                self.message_output('结契失败，放弃结契，继续刷材料')
+                action.touch(pts[0],self.thread_id)
+                if self.wait_change(screen,'ql_abandon',pts[0],self.QILING_WAIT): return
+                continue
+
+            if self.qiling_challenge_disabled(screen):
+                disabled_frames+=1
+                if disabled_frames>=2:
+                    self.message_output('挑战按钮不可用，可能已无挑战次数，停止')
+                    return
+                if self.sleep_fast(0.3): return
+                continue
+            disabled_frames=0
+
+            for i in ('jujue',)+self.QILING_CONTINUE+('tiaozhan5','xiaozhiren'):
                 want=self.imgs[i]
                 size = want[0].shape
                 h, w , ___ = size
-                target=screen
+                target=screen.copy()
                 pts=action.locate(target,want,0)
                 if not len(pts)==0:
                     if last_click==i:
@@ -1661,22 +1816,32 @@ class Worker(QObject):
                     else:
                         refresh=0
                     last_click=i
-                    #self.message_output('重复次数：',refresh)
-                    self.message_output(i)
-                    if i=='tancha' or i=='tiaozhan5':
-                        if refresh==0:
-                            cishu=cishu+1
+                    if i=='tiaozhan5':
+                        #次数按实际发起挑战计算，最后一场的结契与领奖仍要收尾。
+                        if refresh==0 and cishu>=self.cishu_max:
+                            self.message_output('挑战次数已达上限，停止：'+str(cishu)+'/'+str(self.cishu_max))
+                            return
+                        if pending_attacks>=3:
+                            self.message_output('连续点挑战未能进入战斗，可能次数或资源不足，停止')
+                            return
+                        pending_attacks+=1
+                        if refresh==0: cishu+=1
                         self.message_output('挑战次数：'+str(cishu)+'/'+str(self.cishu_max))
                         t = random.randint(50,150) / 100
-                    elif i=='queren3':
-                        t = random.randint(350,450) / 100
                     else:
                         t = random.randint(15,30) / 100
-                    if refresh>6 or cishu>self.cishu_max:
-                        self.message_output('进攻次数上限')
+                    if i in ('zhunbei','ying','jiangli','jixu','shibai'):
+                        pending_attacks=0
+                    if refresh>6:
+                        self.message_output('重复点击后页面未变化，停止：'+i)
                         return
+                    self.message_output(i)
                     xy = action.cheat(pts[0], w, h-10 )
                     action.touch(xy,self.thread_id)
                     if self.sleep_fast(t): return
-                    if self.settle(screen,i,pts[0]): return
+                    if i in self.QILING_CONTINUE or i=='tiaozhan5':
+                        if self.wait_change(screen,i,pts[0],self.QILING_WAIT): return
                     break
+            else:
+                #战斗和结契动画阶段无按钮可点；由 grab() 的空闲超时兜底。
+                if self.sleep_fast(0.2): return
