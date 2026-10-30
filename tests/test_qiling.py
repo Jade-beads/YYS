@@ -15,6 +15,61 @@ from yys import Worker, _Stop
 
 
 class QilingTests(unittest.TestCase):
+    def test_contract_reveal_animation_is_not_treated_as_success(self):
+        clicks, _ = self.replay('contract_reveal.png', limit=0)
+        self.assertEqual(clicks, [], 'do not click until the success heading appears')
+
+    def test_success_page_continues_even_without_a_generic_continue_match(self):
+        #Real success title frame: none of the old continue/confirm templates match.
+        clicks, logs = self.replay('contract_success.png', limit=0)
+        self.assertEqual(len(clicks), 1, (clicks, logs))
+        x, y = clicks[0]
+        self.assertTrue(480 <= x <= 700 and 590 <= y < 640, clicks)
+        self.assertFalse(any('放弃' in line for line in logs), logs)
+
+    def test_success_page_waits_for_transition_and_collects_rewards(self):
+        names = ['contract_success.png', 'reward_open.png', 'reward_items.png', 'challenge.png']
+        images = [cv2.cvtColor(cv2.imread(str(ROOT / 'tests/fixtures/qiling' / name)),
+                              cv2.COLOR_BGR2RGB) for name in names]
+        boxes = [(480, 590, 700, 639), (500, 365, 650, 480), (500, 440, 650, 550)]
+        worker = Worker(0)
+        page, stale, reads = 0, 0, 0
+        clicks, logs = [], []
+
+        def grab():
+            nonlocal reads, stale
+            reads += 1
+            if reads > 35: raise _Stop
+            if stale:
+                stale -= 1
+                return images[page-1].copy()
+            return images[page].copy()
+
+        def tap(xy, tid):
+            nonlocal page, stale
+            clicks.append(tuple(xy))
+            if page >= 3: self.fail('must stop before starting another challenge')
+            left, top, right, bottom = boxes[page]
+            self.assertTrue(left <= xy[0] <= right and top <= xy[1] <= bottom,
+                            (names[page], xy))
+            page += 1
+            stale = 2
+
+        worker.grab = grab
+        worker.sleep_fast = lambda t=0: not worker.isRunning
+        worker.message_output = logs.append
+        with patch.object(action, 'scalar', False), patch.object(action, 'touch', side_effect=tap):
+            worker.run(14, 0)
+        self.assertFalse(any('任务出错' in line for line in logs), logs)
+        self.assertEqual(page, 3, (clicks, logs))
+        self.assertEqual(len(clicks), 3, (clicks, logs))
+
+    def test_unresponsive_success_page_stops_after_bounded_retries(self):
+        clicks, logs = self.replay('contract_success.png', frames=60, limit=0)
+        self.assertGreater(len(clicks), 0, logs)
+        self.assertLessEqual(len(clicks), 3, (clicks, logs))
+        self.assertTrue(any('成功' in line and '停止' in line for line in logs), logs)
+
     def replay(self, name, frames=4, limit=1):
         screen = name if isinstance(name, np.ndarray) else cv2.cvtColor(
             cv2.imread(str(ROOT / 'tests/fixtures/qiling' / name)), cv2.COLOR_BGR2RGB)

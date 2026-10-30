@@ -1742,9 +1742,9 @@ class Worker(QObject):
 
     ########################################################
     #契灵单人：刷材料，结契失败放弃，不点「再次结契」。
-    #成功页按「继续 / 确认」正常领取，保留契灵；不操作「释放 / 弃置 / 召唤」。
+    #成功页识别独立标题后点底部继续，保留契灵；不操作「释放 / 弃置 / 召唤」。
     QILING_CONTINUE=('ying','jiangli','jixu','queding','queren','queren2','queren3','zhunbei','shibai')
-    QILING_WAIT=('ql_failed','ql_abandon','tiaozhan5')+QILING_CONTINUE
+    QILING_WAIT=('ql_failed','ql_abandon','ql_success','tiaozhan5')+QILING_CONTINUE
 
     def qiling_challenge_disabled(self,screen):
         #归一化模板匹配对变灰不敏感。挑战页标题 + 灰度文字位置 + 颜色一起判断。
@@ -1793,6 +1793,21 @@ class Worker(QObject):
                 self.message_output('结契失败，放弃结契，继续刷材料')
                 action.touch(pts[0],self.thread_id)
                 if self.wait_change(screen,'ql_abandon',pts[0],self.QILING_WAIT): return
+                continue
+
+            #成功标题出现时，底部继续文字可能尚未出现，不能只依赖通用 jixu。
+            #只在金色「结契成功」标题出现后点底部空白继续区，不点击揭晓动画。
+            if (pts:=action.locate(screen.copy(),self.imgs['ql_success'],0)):
+                refresh=refresh+1 if last_click=='ql_success' else 0
+                last_click='ql_success'
+                pending_attacks=0
+                if refresh>=3:
+                    self.message_output('结契成功后继续页面未变化，停止，请检查游戏弹窗')
+                    return
+                self.message_output('结契成功，保留契灵，继续领奖并返回挑战')
+                scale=action.scaling_factor if action.scalar else 1
+                action.touch([int(568*scale),int(616*scale)],self.thread_id)
+                if self.wait_change(screen,'ql_success',pts[0],self.QILING_WAIT): return
                 continue
 
             if self.qiling_challenge_disabled(screen):
