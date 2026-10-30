@@ -1819,7 +1819,8 @@ class Worker(QObject):
                 continue
             disabled_frames=0
 
-            for i in ('jujue',)+self.QILING_CONTINUE+('tiaozhan5','xiaozhiren'):
+            #不点左下角小纸人(上游列表里的 xiaozhiren)：开战「战」鼓画面上它有 0.96，会被当成按钮点开；战斗本身是自动的，不需要它
+            for i in ('jujue',)+self.QILING_CONTINUE+('tiaozhan5',):
                 want=self.imgs[i]
                 size = want[0].shape
                 h, w , ___ = size

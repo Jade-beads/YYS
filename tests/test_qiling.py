@@ -19,6 +19,17 @@ class QilingTests(unittest.TestCase):
         clicks, _ = self.replay('contract_reveal.png', limit=0)
         self.assertEqual(clicks, [], 'do not click until the success heading appears')
 
+    def test_bottom_left_paper_doll_is_never_tapped(self):
+        #The upstream list tapped xiaozhiren (0.96 on the battle-start drum screen), opening the paper doll.
+        screen = cv2.cvtColor(cv2.imread(str(ROOT / 'tests/fixtures/qiling/contract_reveal.png')),
+                              cv2.COLOR_BGR2RGB)
+        doll = action.load_imgs('yys')['xiaozhiren'][0]
+        h, w = doll.shape[:2]
+        screen[480:480+h, 48:48+w] = doll
+        self.assertGreaterEqual(float(cv2.matchTemplate(screen, doll, cv2.TM_CCOEFF_NORMED).max()), 0.95)
+        clicks, logs = self.replay(screen, limit=0)
+        self.assertEqual(clicks, [], logs)
+
     def test_success_page_continues_even_without_a_generic_continue_match(self):
         #Real success title frame: none of the old continue/confirm templates match.
         clicks, logs = self.replay('contract_success.png', limit=0)
