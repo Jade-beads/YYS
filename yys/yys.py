@@ -2,12 +2,13 @@ import sys,os,random,time,traceback
 import cv2
 from PyQt6.QtCore import QObject,pyqtSignal
 import action
+from qiju import QijuMixin
 
 #grab() 用来从任务函数的任意深处退出(ADB 断了、长时间认不出界面)，由 run() 接住
 class _Stop(Exception):
     pass
 
-class Worker(QObject):
+class Worker(QObject,QijuMixin):
     finished = pyqtSignal(int)
     progress = pyqtSignal(str,int)
     start_task = pyqtSignal(int, float)  # (任务序号, 次数)；次数用 float 才能把 inf 原样传过来，声明成 int 会被截成乱数
@@ -35,7 +36,8 @@ class Worker(QObject):
         {'description':'14 契灵boss（单刷）','func_name':self.qilingdanren,'count_default':200},\
         {'description':'15 个人突破(打8退'+str(action.config_get('tupo','tui','4'))+')','func_name':self.tupo84,'count_default':'inf'},\
         {'description':'16 英杰试炼·鬼兵演武','func_name':self.yingjie_guibing,'count_default':30},\
-        {'description':'17 英杰试炼·梦墟秘境','func_name':self.yingjie_mengxu,'count_default':50}]
+        {'description':'17 英杰试炼·梦墟秘境','func_name':self.yingjie_mengxu,'count_default':50},\
+        {'description':'18 百鬼棋局(按阵容预设)','func_name':self.baiguiqiju,'count_default':3}]
         #功能序号
         self.index=index
         self.cishu_max=cishu_max

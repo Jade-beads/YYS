@@ -1,4 +1,4 @@
-import cv2,time,os,random,sys,mss,copy,subprocess,shutil,pyautogui
+import cv2,time,os,random,sys,mss,copy,subprocess,shutil,pyautogui,threading
 import numpy
 from PyQt6.QtWidgets import QMessageBox,QPushButton,QInputDialog,QFileDialog
 
@@ -37,15 +37,30 @@ def config_get(section,key,fallback=None):
             return fallback
     return value
 
-#跑 adb 这类命令行工具。打包成窗口程序后，win32 上每个子进程都会弹一下黑色控制台，这里统一隐藏
-def _run(comm,**kwargs):
+#跑 adb 这类命令行工具。打包成窗口程序后，win32 上每个子进程都会弹一下黑色控制台，这里统一隐藏。
+#limit 是硬超时(秒)：2026-11-06 macOS 上 subprocess 有一次 fork 出来的子进程还没 exec adb 就卡死在不可中断状态(STAT U，
+#kill -9 都杀不掉)，主线程在 Popen 里读管道永远等不到返回，百鬼棋局整局后半段脚本一动不动。subprocess 自己的 timeout
+#只管到 communicate，管不到 Popen，所以放到线程里跑，超时就丢下那个线程，抛 TimeoutExpired 让调用方当作失败处理
+def _run(comm,limit=20,**kwargs):
     if sys.platform=='win32':
         startupinfo = subprocess.STARTUPINFO()
         startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
         startupinfo.wShowWindow = subprocess.SW_HIDE
         kwargs.setdefault('startupinfo',startupinfo)
         kwargs.setdefault('creationflags',subprocess.CREATE_NO_WINDOW)
-    return subprocess.run(comm,shell=False,**kwargs)
+    box={}
+    def work():
+        try:
+            box['out']=subprocess.run(comm,shell=False,timeout=limit,**kwargs)
+        except BaseException as e:
+            box['err']=e
+    t=threading.Thread(target=work,daemon=True)
+    t.start(); t.join(limit+2)
+    if t.is_alive():
+        raise subprocess.TimeoutExpired(comm,limit)
+    if 'err' in box:
+        raise box['err']
+    return box['out']
 
 def adb_connect(addr):
     try:
@@ -409,12 +424,33 @@ def touch(pos,thread_id):
     if adb_enable[thread_id]:
         comm=[adb_path,"-s",devices_tab[thread_id],"shell","input","tap",str(x),str(y)]
         #textBrowser.append('Command: ',comm)
-        _run(comm)
+        try:
+            _run(comm)
+        except Exception as e:      #adb 卡住/断开：这一下没点出去，任务下一帧会重新判断
+            print('touch failed:',repr(e),flush=True)
     else:
         pyautogui.click(pos)
 
 
 
+
+#按住 start 拖到 end 再松开(百鬼棋局的上阵、装御魂、卖卡)。ms 是整段拖动的时长：
+#2026-11 实测 MuMu + ADB 800 ms 游戏能认，拖得太快会被当成点击
+def drag(start,end,thread_id,ms=800):
+    last_touch[thread_id]=time.time()
+    (x0,y0),(x1,y1)=start,end
+    if adb_enable[thread_id]:
+        comm=[adb_path,"-s",devices_tab[thread_id],"shell","input","touchscreen","swipe",
+              str(int(x0)),str(int(y0)),str(int(x1)),str(int(y1)),str(int(ms))]
+        try:
+            _run(comm)
+        except Exception as e:
+            print('drag failed:',repr(e),flush=True)
+    else:
+        pyautogui.moveTo(x0,y0)
+        pyautogui.mouseDown(button='left')
+        pyautogui.moveTo(x1,y1,duration=ms/1000)
+        pyautogui.mouseUp(button='left')
 
 def swipe(pos,thread_id,dy):
     last_touch[thread_id]=time.time()
@@ -429,7 +465,10 @@ def swipe(pos,thread_id,dy):
         comm=[adb_path,"-s",devices_tab[thread_id],"shell","input","touchscreen","swipe",str(x),str(y),str(x1),str(y1)]
         #print(comm)
         #textBrowser.append('Command: ',comm)
-        _run(comm)
+        try:
+            _run(comm)
+        except Exception as e:
+            print('swipe failed:',repr(e),flush=True)
     else:
         # Move to the starting point and press the left mouse button
         pyautogui.moveTo(pos)
