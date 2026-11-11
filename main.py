@@ -13,6 +13,7 @@ from PyQt6.QtWidgets import (
     QDialog,
 )
 from PyQt6.QtCore import QThread,pyqtSignal,QProcess,QMutex,Qt
+from PyQt6.QtGui import QIcon
 import action
 import traceback
 
@@ -76,6 +77,7 @@ class MainWindow(QMainWindow):
             self.tab[i].pushButton_start.clicked.connect(partial(self.start_stop, thread_id=i))
             self.tab[i].pushButton_clear.clicked.connect(partial(self.click_clear, thread_id=i))
             self.tab[i].pushButton_restart.clicked.connect(partial(self.click_restart, thread_id=i))
+            self.tab[i].pushButton_reset.clicked.connect(lambda checked=False, thread_id=i: self.click_reset(thread_id))
             self.tab[i].listWidget.currentItemChanged.connect(partial(self.click_list, thread_id=i))
             #self.tab[i].textBrowser.textChanged.connect(lambda thread_id=i: self.text_changed(thread_id))
             self.tab[i].textBrowser.textChanged.connect(partial(self.text_changed, thread_id=i))
@@ -85,9 +87,9 @@ class MainWindow(QMainWindow):
         
         # Load worker list items asynchronously
         # For now, create a dummy worker just to get the function list
-        dummy_worker = game.Worker(0)
+        self.template_worker = game.Worker(0)
         for i in range(self.nthread):
-            for item in dummy_worker.func:
+            for item in self.template_worker.func:
                 self.tab[i].listWidget.addItem(item['description'])
             
             # Connect worker signals AFTER thread setup
@@ -102,6 +104,25 @@ class MainWindow(QMainWindow):
     #清空日志按键
     def click_clear(self,thread_id):
         self.tab[thread_id].textBrowser.clear()
+    #重新加载图片模板
+    def click_reset(self,thread_id):
+        textBrowser=self.tab[thread_id].textBrowser
+        if any(self.isRunning):
+            textBrowser.append('请先停止所有脚本再重置图片')
+            return
+        try:
+            images=action.load_imgs(self.template_worker.game_name)
+        except Exception as e:
+            textBrowser.append(f'图片加载失败：{e}')
+            return
+        if not images:
+            textBrowser.append('图片加载失败：未找到图片')
+            return
+        self.template_worker.imgs=images
+        for worker in self.workers:
+            if worker is not None:
+                worker.imgs=images
+        textBrowser.append(f'已重新加载图片：{len(images)}张')
     #更新日志按键
     def update_text_browser(self,text,thread_id):
         self.tab[thread_id].textBrowser.append(text)
@@ -200,11 +221,11 @@ class MainWindow(QMainWindow):
                 
                 # ✅ Emit signal to worker thread (queued, non-blocking)
                 self.t_start[thread_id]=time.time()
-                self.workers[thread_id].start_task.emit(index, cishu_max)
                 self.isRunning[thread_id]=True
                 self.workers[thread_id].isRunning=True
                 pushButton_start.setText('停止')
                 pushButton_restart.setEnabled(False)
+                self.workers[thread_id].start_task.emit(index, cishu_max)
         elif not listWidget.selectedItems():
             #没有选择任何脚本
             textBrowser.append('无效选项')
@@ -350,6 +371,7 @@ if __name__ == '__main__':
     #action.init_thread_variable(nthread)
     #GUI
     app = QApplication(sys.argv)
+    app.setWindowIcon(QIcon(resource_path('icon.png')))
     # Quick GUI test if requested (helps verify bundled Qt works)
     if args.gui_test:
         QMessageBox.information(None, 'GUI Test', 'GUI is working (test).')

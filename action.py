@@ -1,6 +1,16 @@
 import cv2,time,os,random,sys,mss,copy,subprocess,shutil,pyautogui,threading
 import numpy
-from PyQt6.QtWidgets import QMessageBox,QPushButton,QInputDialog,QFileDialog
+from PyQt6.QtWidgets import (
+    QDialog,
+    QFileDialog,
+    QHBoxLayout,
+    QLabel,
+    QLineEdit,
+    QListWidget,
+    QPushButton,
+    QVBoxLayout,
+)
+from PyQt6.QtGui import QIntValidator
 
 #global variables
 devices_tab=[None]
@@ -76,20 +86,85 @@ def adb_devices():
     except Exception as e:
         return 'ADB error: '+str(e)
 
-#从 adb devices 的输出里挑出在线的设备
-def parse_devices(out):
-    devices=[]
-    for line in out.splitlines()[1:]:
-        device=line.split()
-        if len(device)==2 and device[1]=='device':
-            devices.append(device[0])
-    return devices
-
 #initialization thread
 def init_thread_variable(nthread):
     global devices_tab,adb_enable
     devices_tab=[None]*nthread
     adb_enable=[False]*nthread
+
+
+def parse_adb_devices(output):
+    """Return usable device IDs from the output of ``adb devices``."""
+    devices = []
+    for line in output.splitlines()[1:]:
+        fields = line.split()
+        if len(fields) == 2 and fields[1] == 'device':
+            devices.append(fields[0])
+    return devices
+
+
+class DeviceSelectionDialog(QDialog):
+    def __init__(self, parent, adb_path, devices):
+        super().__init__(parent)
+        self.adb_path = adb_path
+        self.selected_device = None
+        self.setWindowTitle('选择安卓设备')
+
+        self.device_list = QListWidget()
+        self.device_list.addItems(devices)
+        self.device_list.itemDoubleClicked.connect(self._select_device)
+
+        self.port_input = QLineEdit()
+        self.port_input.setPlaceholderText('输入新端口，例如 16384（MuMu 多开每个 +32）')
+        self.port_input.setValidator(QIntValidator(0, 65535, self))
+        self.connect_port_button = QPushButton('连接端口')
+        self.connect_port_button.clicked.connect(self._connect_port)
+
+        self.status_label = QLabel('选择已检测到的设备，或输入新端口连接')
+        self.select_button = QPushButton('连接选中设备')
+        self.select_button.clicked.connect(self._select_device)
+        cancel_button = QPushButton('取消')
+        cancel_button.clicked.connect(self.reject)
+
+        port_layout = QHBoxLayout()
+        port_layout.addWidget(self.port_input)
+        port_layout.addWidget(self.connect_port_button)
+        button_layout = QHBoxLayout()
+        button_layout.addWidget(self.select_button)
+        button_layout.addWidget(cancel_button)
+
+        layout = QVBoxLayout(self)
+        layout.addWidget(QLabel('检测到的设备'))
+        layout.addWidget(self.device_list)
+        layout.addLayout(port_layout)
+        layout.addWidget(self.status_label)
+        layout.addLayout(button_layout)
+
+    def _select_device(self):
+        item = self.device_list.currentItem()
+        if item is None:
+            self.status_label.setText('请先选择一个设备')
+            return
+        self.selected_device = item.text()
+        self.accept()
+
+    def _connect_port(self):
+        port = self.port_input.text()
+        if not port:
+            self.status_label.setText('请输入端口')
+            return
+
+        device = f'127.0.0.1:{port}'
+        output = adb_connect(device)
+        if output:
+            self.status_label.setText(output)
+        if device not in parse_adb_devices(adb_devices()):
+            self.status_label.setText(f'连接失败：未检测到 {device}')
+            return
+
+        self.selected_device = device
+        self.accept()
+
 
 def startup(window):
     global scalar,scaling_factor,monitor,adb_enable,adb_path,devices_tab
@@ -99,7 +174,6 @@ def startup(window):
     #config.ini 可手动指定 adb_path(adb 可执行文件)和 adb_address(模拟器 ip:端口)，自动检测失败时用
     cfg_adb=config_get('general','adb_path')
     addr=config_get('general','adb_address')
-    mumu=False
     #检测ADB
     if cfg_adb:
         adb_path=cfg_adb
@@ -113,7 +187,6 @@ def startup(window):
                 adb_path=id_path
                 if 'MuMu' in id_path:
                     textBrowser.append('检测到MuMu模拟器')
-                    mumu=True
                 elif 'LD' in id_path:
                     textBrowser.append('检测到雷电模拟器')
                 break
@@ -129,42 +202,22 @@ def startup(window):
     else:
         adb_path='adb'
 
-    #连接模拟器：config.ini 的 adb_address > MuMu 端口弹窗 > 检测不到设备时弹窗问地址
-    #（雷电/真机会被 adb 自动发现，不需要 connect）
-    if not addr and mumu:
-        port, ok = QInputDialog.getInt(window, '模拟器端口', '输入MuMu模拟器端口（默认16384，多开每个+32）：',16384,0,65535,1)
-        if ok:
-            addr='127.0.0.1:'+str(port)
+    #config.ini 写了 adb_address 就先连它
     if addr:
         textBrowser.append(f'连接 {addr}：'+adb_connect(addr))
     out=adb_devices()
     textBrowser.append(out)
-    devices=parse_devices(out)
-    if len(devices)==0 and not addr:
-        addr, ok = QInputDialog.getText(window, '模拟器ADB地址',
-            '未检测到ADB设备。输入模拟器的ADB地址后重试\n（MuMu默认 127.0.0.1:16384，多开每个+32，可在MuMu的「问题诊断」里查看）。\n取消则使用桌面版：', text='127.0.0.1:16384')
-        addr=addr.strip() if ok else ''
-        if addr:
-            textBrowser.append(f'连接 {addr}：'+adb_connect(addr))
-            out=adb_devices()
-            textBrowser.append(out)
-            devices=parse_devices(out)
-    #存在ADB设备
-    if len(devices)>0:
-        #如果存在多个ADB设备，选择其中一个
-        if len(devices)==1:
-            device=devices[0]
-        else:
-            #popup window
-            msg_box = QMessageBox()
-            msg_box.setText("选择安卓设备")
-            # Change the button texts
-            for device in devices:
-                button = QPushButton(device)
-                msg_box.addButton(button, QMessageBox.ButtonRole.ActionRole)
-            msg_box.exec()
-            clicked = msg_box.clickedButton()
-            device = clicked.text() if clicked is not None else devices[0]
+    devices = parse_adb_devices(out)
+
+    #config.ini 指定的设备已连上就直接用，否则弹设备选择框(选检测到的设备，或输入端口连接；取消=桌面版)
+    device=None
+    if addr and addr in devices:
+        device=addr
+    else:
+        dialog = DeviceSelectionDialog(window, adb_path, devices)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            device = dialog.selected_device
+    if device:
         textBrowser.append('监测到ADB设备，默认使用安卓截图')
         devices_tab[thread_id]=device
         adb_enable[thread_id]=True

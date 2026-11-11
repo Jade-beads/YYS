@@ -13,6 +13,7 @@ a = Analysis(
     datas=[
         ('main.ui', '.'),
         ('config.ini', '.'),
+        ('icon.png', '.'),
         ('yys', 'yys'),
         ('nsh', 'nsh'),
     ],

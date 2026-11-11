@@ -49,9 +49,11 @@ class Worker(QObject,QijuMixin):
 
     def execute_task(self, index, cishu_max):
         """Slot that receives the start signal with parameters"""
-        self.run(index, cishu_max)
+        self.run(index, cishu_max, arm=False)
     
-    def run(self,index=None,cishu_max=None):
+    #arm=False：界面在发信号前已经把 isRunning 置 True，这里不再置位，否则排队期间点的「停止」会被盖掉(上游 6a369e8)；
+    #测试和无界面工具直接调 run()，用默认的 arm=True
+    def run(self,index=None,cishu_max=None,arm=True):
         #self.progress.emit('Thread is '+str(self.thread_id),self.thread_id)
         #self.progress.emit('Call function index '+str(self.index)+' with max count of '+str(self.cishu_max),self.thread_id)
         self.index=index
@@ -60,7 +62,7 @@ class Worker(QObject,QijuMixin):
         elif cishu_max != float('inf'):
             cishu_max = int(cishu_max)
         self.cishu_max=cishu_max
-        self.isRunning=True
+        if arm: self.isRunning=True
         self.act_t=time.time()      #上次"认出界面"的时间：点击、或有意等待 >=1 秒
         self.warn_t=0
         self.fail_n=0
@@ -223,8 +225,8 @@ class Worker(QObject,QijuMixin):
                 if not len(pts)==0:
                     #无次数，等待5分钟
                     if i == 'tuposhangxian':
-                            self.message_output('进攻CD，暂停5分钟')
-                            t=60*5
+                            self.message_output('进攻CD，暂停1分钟')
+                            t=60
                             if self.sleep_fast(t): return
                             break
                     if last_click==i:
@@ -821,7 +823,7 @@ class Worker(QObject,QijuMixin):
                 continue
 
             for i in names or ['jujue','querenyuhun','zhidao','ying','jiangli','jiangli2','jixu','zhunbei','guanbi',\
-                      'tiaozhan','tiaozhan2','tiaozhan4','queding','tancha','shibai']:
+                      'tiaozhan','tiaozhan2','tiaozhan3','tiaozhan4','queding','tancha','shibai']:
                 want=self.imgs[i]
                 size = want[0].shape
                 h, w , ___ = size
@@ -1112,7 +1114,7 @@ class Worker(QObject,QijuMixin):
         last_click=''
         cishu=0
         refresh=0
-        right = (654, 420)
+        right = (654, 520)
         left = (454, 420)
         
         boss_done=False
@@ -1182,6 +1184,7 @@ class Worker(QObject,QijuMixin):
                         break
 
                 if len(pts)==0:
+                    refresh=0
                     if not boss_done:
                         self.message_output('向右走')
                         xy = action.cheat(right, 10, 10)
@@ -1226,6 +1229,7 @@ class Worker(QObject,QijuMixin):
                     if refresh==0 and i=='tansuo':
                         cishu=cishu+1
                         self.message_output('探索次数：'+str(cishu)+'/'+str(self.cishu_max))
+                        boss_done=False
                     if refresh>6 or cishu>self.cishu_max:
                         self.message_output('进攻次数上限')
                         return
@@ -1351,7 +1355,7 @@ class Worker(QObject,QijuMixin):
 
             for i in ['jujue','shoudong','zidong','queren',\
                       'douji','douji2','douji3','douji4','douji5',\
-                      'doujilianxi',\
+                      'doujilianxi','doujizidong',\
                       'doujiqueren','doujiend','ying','jixu',\
                       'zhunbei','zhunbei2',\
                       'doujiquxiao','guanbi']:
@@ -1446,7 +1450,7 @@ class Worker(QObject,QijuMixin):
                     if refresh>6 or cishu>self.cishu_max:
                         self.message_output('进攻次数上限')
                         return
-                    if i=='hdsousuo':
+                    if 'hdsousuo' in i:
                         t=5
                     if i=='hdend':
                         if refresh==0:

@@ -78,7 +78,8 @@ class QijuMixin:
             'qj_fuzhou':0.8,'qj_liudao':0.8}
 
     def qj_tpl(self,name):
-        if not hasattr(self,'_qj_gray'): self._qj_gray={}
+        #「重置截图」会换掉 self.imgs，灰度缓存跟着作废
+        if getattr(self,'_qj_src',None) is not self.imgs: self._qj_gray={}; self._qj_src=self.imgs
         if name not in self._qj_gray: self._qj_gray[name]=_gray(self.imgs[name][0])
         return self._qj_gray[name]
 
