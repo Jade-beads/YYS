@@ -170,7 +170,7 @@ class MainWindow(QMainWindow):
         pushButton_restart=self.tab[thread_id].pushButton_restart
         if self.threads[thread_id] and self.isRunning[thread_id]:
             #stop running job
-            pushButton_start.setText('开始')
+            pushButton_start.setText('停止中…')
             pushButton_start.setEnabled(False)
             mutex.lock()  # Acquire the lock
             self.workers[thread_id].isRunning=False
@@ -188,23 +188,18 @@ class MainWindow(QMainWindow):
             #设置次数
             if not lineEdit.text() == 'inf':
                 try:
-                    mutex.lock()  # Acquire the lock
                     cishu_max=int(lineEdit.text())
-                    mutex.unlock()  # Release the lock
-                    if cishu_max<1 or cishu_max>9999:
-                        raise Exception('数字超出范围（1-9999）')
-                except ValueError:
+                except ValueError as e:
+                    print(f'次数输入错误：{e}',flush=True)
                     textBrowser.append('请输入数字')
                     pushButton_start.setText('开始')
                     return
-                except Exception as e:
-                    textBrowser.append(f'数字超出范围（1-9999）: {e}')
+                if cishu_max<1 or cishu_max>9999:
+                    textBrowser.append('数字超出范围（1-9999）')
                     pushButton_start.setText('开始')
                     return
             else:
-                mutex.lock()  # Acquire the lock
                 cishu_max=float('inf')
-                mutex.unlock()  # Release the lock
 
             if index==0:
                 #debug has to be on main thread

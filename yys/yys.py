@@ -1110,12 +1110,14 @@ class Worker(QObject,QijuMixin):
                 
     ########################################################
     #探索单人
+    EXPLORE_WAIT=('queren','guding','boss','boss2','jian','jian2',
+                  'tuichu','tuichu2','tansuo','ying','jiangli','jixu','zhunbei','c28','ditu')
+
     def gouliang3(self):
         last_click=''
         cishu=0
         refresh=0
         right = (654, 520)
-        left = (454, 420)
         
         boss_done=False
         while self.isRunning:   #直到取消，或者出错
@@ -1126,7 +1128,7 @@ class Worker(QObject,QijuMixin):
             want = self.imgs['notili']
             size = want[0].shape
             h, w , ___ = size
-            target = screen
+            target = screen.copy()
             pts = action.locate(target,want,0)
             if not len(pts) == 0:
                 self.message_output('体力不足')
@@ -1135,34 +1137,31 @@ class Worker(QObject,QijuMixin):
             want = self.imgs['queren']
             size = want[0].shape
             h, w , ___ = size
-            target = screen
-            #x1,x2 = upleft, (965, 522)
-            #target = action.cut(screen, x1, x2)
+            target = screen.copy()
             pts = action.locate(target,want,0)
             if not len(pts) == 0:
                 self.message_output('确认退出')
-                try:
-                    queding = pts[1]
-                except:
-                    queding = pts[0]
+                queding = pts[1] if len(pts)>1 else pts[0]
                 xy = action.cheat(queding, w, h)
                 action.touch(xy,self.thread_id)
-                t = random.randint(15,30) / 100
-                if self.sleep_fast(t): return
+                boss_done=False
+                #弹窗背后的「固定阵容」和返回箭头仍能匹配，不能再处理这张旧图。
+                if self.wait_change(screen,'queren',queding,self.EXPLORE_WAIT): return
+                continue
 
             
             #设定目标，开始查找
             #进入后
             want=self.imgs['guding']
 
-            pts = action.locate(screen,want,0)
+            pts = action.locate(screen.copy(),want,0)
             if not len(pts) == 0:
                 self.message_output('正在地图中')
                 for i in ['boss','boss2','jian','jian2']:
                     want = self.imgs[i]
                     size = want[0].shape
                     h, w , ___ = size
-                    target = screen
+                    target = screen.copy()
                     pts = action.locate(target,want,0)
                     if not len(pts) == 0:
                         if 'boss' in i:
@@ -1180,8 +1179,12 @@ class Worker(QObject,QijuMixin):
                         self.message_output('点击小怪'+i)
                         xy = action.cheat(pts[0], w, h)
                         action.touch(xy,self.thread_id)
-                        time.sleep(0.5)
+                        if self.sleep_fast(0.5): return
+                        if self.wait_change(screen,i,pts[0],self.EXPLORE_WAIT): return
                         break
+
+                if pts:
+                    continue
 
                 if len(pts)==0:
                     refresh=0
@@ -1198,17 +1201,14 @@ class Worker(QObject,QijuMixin):
                             want = self.imgs[i]
                             size = want[0].shape
                             h, w , ___ = size
-                            pts = action.locate(screen,want,0)
+                            pts = action.locate(screen.copy(),want,0)
                             if not len(pts) == 0:
                                 self.message_output('退出中'+i)
-                                try:
-                                    queding = pts[1]
-                                except:
-                                    queding = pts[0]
+                                queding = pts[1] if len(pts)>1 else pts[0]
                                 xy = action.cheat(queding, w, h)
                                 action.touch(xy,self.thread_id)
-                                t = random.randint(50,80) / 100
-                                if self.sleep_fast(t): return
+                                if self.wait_change(screen,i,queding,self.EXPLORE_WAIT): return
+                                break
                     continue
 
             #zhunbei：点小怪后这版客户端会停在战斗准备页，没有它就卡住(2026-09-26 实测)
@@ -1217,7 +1217,7 @@ class Worker(QObject,QijuMixin):
                 want = self.imgs[i]
                 size = want[0].shape
                 h, w , ___ = size
-                target = screen
+                target = screen.copy()
                 pts = action.locate(target,want,0)
                 if not len(pts) == 0:
                     if last_click==i:
@@ -1227,6 +1227,9 @@ class Worker(QObject,QijuMixin):
                     last_click=i
                     #self.message_output('重复次数：',refresh)
                     if refresh==0 and i=='tansuo':
+                        if cishu>=self.cishu_max:
+                            self.message_output('探索次数已达上限，停在章节入口')
+                            return
                         cishu=cishu+1
                         self.message_output('探索次数：'+str(cishu)+'/'+str(self.cishu_max))
                         boss_done=False
@@ -1238,7 +1241,9 @@ class Worker(QObject,QijuMixin):
                     action.touch(xy,self.thread_id)
                     t = random.randint(15,30) / 100
                     if self.sleep_fast(t): return
-                    if self.settle(screen,i,pts[0]): return
+                    if i in ('tansuo','c28','ditu'):
+                        if self.wait_change(screen,i,pts[0],self.EXPLORE_WAIT): return
+                    elif self.settle(screen,i,pts[0]): return
                     break
 
     ########################################################
